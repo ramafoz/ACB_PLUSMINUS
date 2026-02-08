@@ -1,0 +1,5 @@
+ROLE_USER = "user"
+ROLE_WIKI = "wiki"
+ROLE_ADMIN = "admin"
+
+ALL_ROLES = {ROLE_USER, ROLE_WIKI, ROLE_ADMIN}

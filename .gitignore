@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# SQLite
+*.sqlite
+*.db
+
+# Logs
+*.log
+
+# Env
+.env
+
+# Node / frontend (si lo añades luego)
+node_modules/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
