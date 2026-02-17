@@ -75,16 +75,16 @@ def create_fixture(
 
 @router.get("/fixtures", response_model=list[FixtureOut])
 def list_fixtures(
+    season_id: str = SEASON_ID,
     round_number: Optional[int] = None,
     user=Depends(require_wiki),
     db: Session = Depends(get_db),
 ):
-    q = db.query(Fixture).filter_by(season_id=SEASON_ID)
+    q = db.query(Fixture).filter(Fixture.season_id == season_id)
     if round_number is not None:
         q = q.filter(Fixture.round_number == round_number)
 
     return q.order_by(Fixture.round_number.asc(), Fixture.kickoff_at.asc().nulls_last(), Fixture.id.asc()).all()
-
 
 @router.patch("/fixtures/{fixture_id}", response_model=FixtureOut)
 def update_fixture(
