@@ -5,3 +5,4 @@ from app.models.roster import UserSeasonState, UserRosterBase, UserRosterDraft, 
 from app.models.teams import Team  # noqa: F401
 from app.models.fixtures import Fixture  # noqa: F401
 from app.models.season import SeasonState  # noqa: F401
+from app.models.players import Player  # noqa: F401
