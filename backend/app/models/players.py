@@ -9,24 +9,26 @@ class Player(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    # External identifier (ACB). Keep string: sometimes sites use non-numeric slugs/ids.
+    # Keep season explicit (teams are season-scoped)
+    season_id = Column(String, nullable=False, index=True)
+
+    # External identifier (ACB). Optional at first.
     acb_player_id = Column(String, nullable=True, index=True)
 
-    # Display info
+    # Display
     name = Column(String, nullable=False, index=True)
 
-    # Link to your existing teams table (assuming teams.team_id is a String PK or unique).
-    team_id = Column(String, ForeignKey("teams.team_id"), nullable=True, index=True)
+    # Proper FK to teams.id (PK)
+    team_pk_id = Column(Integer, ForeignKey("teams.id"), nullable=True, index=True)
 
-    # Optional metadata (we’ll fill later)
-    position = Column(String, nullable=True)      # "G/F/C" etc (later)
+    # Optional metadata
+    position = Column(String, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
 
     team = relationship("Team", lazy="joined")
 
     __table_args__ = (
-        # Prevent duplicates when we do repeated scrapes:
-        # If ACB id exists -> unique; if missing, we’ll fall back to (name, team_id) in code.
-        UniqueConstraint("acb_player_id", name="uq_players_acb_player_id"),
-        Index("ix_players_team_name", "team_id", "name"),
+        # Keep unique when we have ACB ids (but allow multiple NULLs)
+        UniqueConstraint("season_id", "acb_player_id", name="uq_players_season_acb_player_id"),
+        Index("ix_players_season_team_name", "season_id", "team_pk_id", "name"),
     )
