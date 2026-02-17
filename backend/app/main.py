@@ -10,6 +10,7 @@ from app.api.routes.teams import router as teams_router
 from app.api.routes.wiki_teams import router as wiki_teams_router
 from app.api.routes.fixtures import router as fixtures_router
 from app.api.routes.wiki_fixtures import router as wiki_fixtures_router
+from app.api.routes.wiki_players import router as wiki_players_router
 
 app = FastAPI(title="ACB PlusMinus")
 app.include_router(me_router)
@@ -20,6 +21,7 @@ app.include_router(teams_router)
 app.include_router(wiki_teams_router)
 app.include_router(fixtures_router)
 app.include_router(wiki_fixtures_router)
+app.include_router(wiki_players_router)
 
 @app.on_event("startup")
 def on_startup():
