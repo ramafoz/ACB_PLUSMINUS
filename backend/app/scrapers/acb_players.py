@@ -82,3 +82,38 @@ def parse_roster_players(html: str) -> List[Dict[str, str]]:
 
     return out
 
+def canonicalize_position(position_raw: str) -> str:
+    """
+    Convert ACB position strings to our canonical 5 keys:
+    BASE, ESCOLTA, ALERO, ALA-PIVOT, PIVOT
+    """
+    p = (position_raw or "").strip().upper()
+
+    # Remove accents (minimal)
+    p = (p.replace("Á", "A")
+           .replace("É", "E")
+           .replace("Í", "I")
+           .replace("Ó", "O")
+           .replace("Ú", "U"))
+
+    # Normalize hyphens
+    p = p.replace("—", "-").replace("–", "-")
+
+    # Common ACB strings
+    if p == "ALA-PIVOT" or p == "ALA-PIVOT ":
+        return "ALA-PIVOT"
+    if p == "ALA-PIVOT" or p == "ALA-PIVOT":
+        return "ALA-PIVOT"
+
+    # After accent removal, "ALA-PÍVOT" becomes "ALA-PIVOT" already
+    if p == "ALA-PIVOT":
+        return "ALA-PIVOT"
+
+    if p in ("BASE", "ESCOLTA", "ALERO"):
+        return p
+    if p in ("PIVOT",):
+        return "PIVOT"
+    if p in ("ALA PIVOT", "ALA PIVOT"):
+        return "ALA-PIVOT"
+
+    return p or "UNKNOWN"

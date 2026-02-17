@@ -4,8 +4,10 @@ MAX_PLAYERS = 10
 MAX_PER_REAL_TEAM = 2
 MAX_TOTAL_CHANGES = 150
 MIN_BY_POSITION = {
-    "BASE": 2,
-    "ALERO": 3,
-    "PIVOT": 3
+    "BASE": 1,
+    "ESCOLTA": 1,
+    "ALERO": 1,
+    "ALA-PIVOT": 1,
+    "PIVOT": 1
 }
 ALL_POSITIONS = tuple(MIN_BY_POSITION.keys())

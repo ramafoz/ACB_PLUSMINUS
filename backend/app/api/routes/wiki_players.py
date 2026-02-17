@@ -6,7 +6,7 @@ from app.db.session import get_db
 
 from app.schemas.wiki_players import WikiPlayersScrapeRequest
 
-from app.scrapers.acb_players import fetch_team_roster_html, parse_roster_players
+from app.scrapers.acb_players import fetch_team_roster_html, parse_roster_players, canonicalize_position
 from app.models.teams import Team
 
 router = APIRouter(prefix="/wiki/players", tags=["wiki"])
@@ -30,22 +30,32 @@ def scrape_players_stub(
         return {"ok": False, "detail": f"Team {team_id} has no acb_club_id yet. Fill it first."}
 
     fetch_info = fetch_team_roster_html(team.acb_club_id, payload.season_id, include_html=True)
-    html = fetch_info.get("html", "")
-    players = parse_roster_players(html)
-    fetch_info.pop("html", None)
 
     if fetch_info["status_code"] != 200:
         return {"ok": False, "detail": "ACB request failed", "fetch": fetch_info}
 
+    html = fetch_info.get("html", "")
+    players = parse_roster_players(html)
+    fetch_info.pop("html", None)
+
+    preview = []
+    for p in players:
+        preview.append({
+            "acb_player_id": p["acb_player_id"],
+            "name": p["name"],
+            "position_raw": p["position_raw"],
+            "position": canonicalize_position(p["position_raw"]),
+        })
+
     return {
         "ok": True,
-        "step": "5.2_parse_players",
+        "step": "parse_players",
         "team_id": team_id,
         "acb_club_id": team.acb_club_id,
         "fetch": fetch_info,
         "parsed": {
-            "players_count": len(players),
-            "players_sample": players[:10],
+            "players_count": len(preview),
+            "players_sample": preview[:10],
         },
         "dry_run": payload.dry_run,
     }
