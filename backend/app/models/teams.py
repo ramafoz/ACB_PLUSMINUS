@@ -9,7 +9,7 @@ class Team(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    season_id = Column(String, index=True, nullable=False)
+    season_id = Column(String, index=True, nullable=False) # 2025 as ID for 2025-26 season (as in ACB_TEMPORADA_ID, not SEASON_ID)
     team_id = Column(String, nullable=False)         # ej: "BAR", "RMB"
     acb_club_id = Column(String, nullable=True, index=True)  # ej "14"
     name = Column(String, nullable=False)            # ej: "FC Barcelona"

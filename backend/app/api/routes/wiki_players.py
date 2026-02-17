@@ -54,7 +54,7 @@ def scrape_players_stub(
 
         fetch_info = fetch_team_roster_html(
             acb_club_id=team.acb_club_id, 
-            season_id=ACB_TEMPORADA_ID,
+            season_id=payload.temporada_id,
             include_html=True
         )
         if fetch_info.get("status_code") != 200:
@@ -77,10 +77,9 @@ def scrape_players_stub(
         ins = upd = deactivated = 0
 
         if not payload.dry_run:
-            ins, upd = upsert_roster_players(db, payload.season_id, team.id, preview)
+            ins, upd = upsert_roster_players(db, payload.temporada_id, team.id, preview)
             total_inserted += ins
             total_updated += upd
-            total_deactivated += deactivated
 
             # Deactivate players that were previously active for this team+season but are not in the scraped roster now
             seen_ids = {p.get("acb_player_id") for p in preview if p.get("acb_player_id")}
@@ -88,7 +87,7 @@ def scrape_players_stub(
                 deactivated = (
                     db.query(Player)
                     .filter(
-                        Player.season_id == payload.season_id,
+                        Player.season_id == payload.temporada_id,
                         Player.team_pk_id == team.id,
                         Player.acb_player_id.isnot(None),
                         Player.is_active == True,  # noqa: E712
@@ -96,6 +95,7 @@ def scrape_players_stub(
                     )
                     .update({Player.is_active: False}, synchronize_session=False)
                 )
+                total_deactivated += deactivated
 
         total_players += len(preview)
 
@@ -115,7 +115,7 @@ def scrape_players_stub(
     return {
         "ok": True,
         "step": "7.1_multi_team",
-        "season_id": payload.season_id,
+        "season_id": payload.temporada_id,
         "dry_run": payload.dry_run,
         "requested_team_ids": requested_team_ids,
         "totals": {

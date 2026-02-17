@@ -10,7 +10,8 @@ class Player(Base):
     id = Column(Integer, primary_key=True, index=True)
 
     # Keep season explicit (teams are season-scoped)
-    season_id = Column(String, nullable=False, index=True)
+    # 2025 as ID for 2025-26 season (as in ACB_TEMPORADA_ID, not SEASON_ID)
+    season_id = Column(String, nullable=False, index=True) 
 
     # External identifier (ACB). Optional at first.
     acb_player_id = Column(String, nullable=True, index=True)
