@@ -1,115 +1,106 @@
+#app/api/routes/public_catalog.py
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from typing import Optional
+from pydantic import BaseModel
 
 from app.core.security import get_db
-from app.core.game_config import SEASON_ID
+from app.core.game_config import ACB_TEMPORADA_ID
 from app.models.teams import Team
 from app.models.players import Player
 
 router = APIRouter(prefix="/api/v1/public", tags=["public"])
 
 
-@router.get("/teams")
+class TeamPublicOut(BaseModel):
+    season_id: str
+    team_id: str
+    acb_club_id: str | None
+    name: str
+    short_name: str | None
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class PlayerPublicOut(BaseModel):
+    id: int
+    season_id: str
+    acb_player_id: str | None
+    name: str
+    position: str | None
+    is_active: bool
+    team_id: str | None
+    team_name: str | None
+
+    class Config:
+        from_attributes = True
+
+@router.get("/teams", response_model=list[TeamPublicOut])
 def public_list_teams(
-    season_id: str = SEASON_ID,
-    only_active: bool = True,
+    season_id: str = Query(default=ACB_TEMPORADA_ID),
+    only_active: bool = Query(default=True),
     db: Session = Depends(get_db),
 ):
+    season_id = (season_id or ACB_TEMPORADA_ID).strip()
     q = db.query(Team).filter(Team.season_id == season_id)
     if only_active:
         q = q.filter(Team.is_active == True)
 
-    rows = q.order_by(Team.name.asc()).all()
-
-    return [
-        {
-            "team_id": t.team_id,           # e.g. "BAR", "RMB"
-            "acb_club_id": t.acb_club_id,   # e.g. "14"
-            "name": t.name,                # e.g. "FC Barcelona"
-            "short_name": t.short_name,    # e.g. "Barça"
-            "is_active": t.is_active,
-        }
-        for t in rows
-    ]
+    return q.order_by(Team.team_id.asc()).all()
 
 
-@router.get("/players")
+@router.get("/players", response_model=list[PlayerPublicOut])
 def public_list_players(
-    season_id: str = SEASON_ID,
-    team_id: Optional[str] = None,                 # Team.team_id (e.g. "BAR")
-    team_pk_id: Optional[int] = None,              # Team.id (PK)
-    only_active: bool = True,
+    season_id: str = Query(default=ACB_TEMPORADA_ID),
+    team_id: str | None = Query(default=None),     # Team.team_id (e.g. "BAR")
+    only_active: bool = Query(default=True),
     db: Session = Depends(get_db),
 ):
+    season_id = (season_id or ACB_TEMPORADA_ID).strip()
+
     q = db.query(Player).filter(Player.season_id == season_id)
 
-    if only_active:
-        q = q.filter(Player.is_active == True)
+    # If filtering by team_id, resolve to Team.id first (team_pk_id)
+    team_pk_id = None
+    team_name = None
+    if team_id:
+        tid = team_id.strip().upper()
+        t = db.query(Team).filter(Team.season_id == season_id, Team.team_id == tid).first()
+        if not t:
+            return []
+        team_pk_id = t.id
+        team_name = t.name
 
-    # Allow filtering either by team_pk_id OR by team_id (human-friendly)
+    q = db.query(Player).filter(Player.season_id == season_id)
+    if only_active:
+        q = q.filter(Player.is_active == True)  # noqa: E712
     if team_pk_id is not None:
         q = q.filter(Player.team_pk_id == team_pk_id)
-    elif team_id is not None:
-        # join via relationship (Player.team is lazy="joined", but we still join for filtering)
-        q = q.join(Player.team).filter(Team.team_id == team_id, Team.season_id == season_id)
 
-    rows = q.order_by(Player.name.asc()).all()
+    rows = q.order_by(Player.name.asc(), Player.id.asc()).all()
 
-    return [
-        {
-            "id": p.id,
-            "acb_player_id": p.acb_player_id,
-            "name": p.name,
-            "position": p.position,
-            "is_active": p.is_active,
-            "team_pk_id": p.team_pk_id,
-            # include team fields to avoid extra call on frontend
-            "team": (
-                {
-                    "team_id": p.team.team_id,
-                    "acb_club_id": p.team.acb_club_id,
-                    "name": p.team.name,
-                    "short_name": p.team.short_name,
-                    "is_active": p.team.is_active,
-                }
-                if p.team is not None
-                else None
-            ),
-        }
-        for p in rows
-    ]
+    # attach team_id/team_name cheaply
+    # (we can join later if you want, but this is simple & fast enough for ACB size)
+    out: list[PlayerPublicOut] = []
+    for p in rows:
+        t = None
+        if p.team_pk_id:
+            t = db.query(Team).filter(Team.id == p.team_pk_id).first()
+        out.append(
+            PlayerPublicOut(
+                id=p.id,
+                season_id=p.season_id,
+                acb_player_id=p.acb_player_id,
+                name=p.name,
+                position=p.position,
+                is_active=p.is_active,
+                team_id=(t.team_id if t else None),
+                team_name=(t.name if t else team_name),
+            )
+        )
 
-@router.get("/teams/{team_id}/players")
-def public_list_team_players(
-    team_id: str,
-    season_id: str = SEASON_ID,
-    only_active: bool = True,
-    db: Session = Depends(get_db),
-):
-    team = (
-        db.query(Team)
-        .filter(Team.season_id == season_id, Team.team_id == team_id)
-        .first()
-    )
-    if not team:
-        return []
-
-    q = db.query(Player).filter(Player.season_id == season_id, Player.team_pk_id == team.id)
-    if only_active:
-        q = q.filter(Player.is_active == True)
-
-    rows = q.order_by(Player.name.asc()).all()
-
-    return [
-        {
-            "id": p.id,
-            "acb_player_id": p.acb_player_id,
-            "name": p.name,
-            "position": p.position,
-            "is_active": p.is_active,
-        }
-        for p in rows
-    ]
+    return out

@@ -2,14 +2,23 @@ import httpx
 import re
 
 from html import unescape
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Union
 
-from app.core.game_config import ACB_TEMPORADA_ID
 from app.scrapers.http import make_client, get_with_retry
 
 
-def fetch_team_roster_html(acb_club_id: str, include_html: bool = False) -> Dict[str, Any]:
-    url = f"https://www.acb.com/club/plantilla-lista/id/{acb_club_id}/temporada_id/{ACB_TEMPORADA_ID}"
+def fetch_team_roster_html(
+        acb_club_id: str, 
+        season_id: Optional[Union[str, int]] = None,
+        *,
+        temporada_id: Optional[Union[str, int]] = None,  # alias support
+        include_html: bool = False
+) -> Dict[str, Any]:
+    # Accept either season_id or temporada_id, and normalize to string
+    sid = season_id if season_id is not None else temporada_id
+    sid = str(sid) if sid is not None else ""
+
+    url = f"https://www.acb.com/club/plantilla-lista/id/{acb_club_id}/temporada_id/{sid}"
     with make_client() as client:
         try:
             resp = get_with_retry(client, url, retries=1, backoff_s=1.0)
