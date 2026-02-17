@@ -11,6 +11,7 @@ class Team(Base):
 
     season_id = Column(String, index=True, nullable=False)
     team_id = Column(String, nullable=False)         # ej: "BAR", "RMB"
+    acb_club_id = Column(String, nullable=True, index=True)  # ej "14"
     name = Column(String, nullable=False)            # ej: "FC Barcelona"
     short_name = Column(String, nullable=True)       # ej: "Barça"
     is_active = Column(Boolean, nullable=False, default=True)
