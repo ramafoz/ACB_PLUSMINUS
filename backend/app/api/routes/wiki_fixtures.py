@@ -1,15 +1,148 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Optional, List
 
 from app.core.security import get_db, require_wiki
-from app.core.game_config import SEASON_ID
+from app.core.game_config import SEASON_ID, ACB_COMPETICION_ID, ROUNDS_REGULAR_SEASON, ACB_JORNADA_ID_ROUND1
+from app.crud.crud_fixture import upsert_fixtures
 from app.models.fixtures import Fixture
 from app.models.teams import Team
 from app.schemas.fixtures import FixtureCreate, FixtureUpdate, FixtureOut
+from app.scrapers.acb_partidos import scrape_partidos
+from app.services.fixture_timing_flags import recompute_flags_roundcentric
 from app.services.market_utils import compute_market_status
 
 router = APIRouter(prefix="/api/v1/wiki", tags=["wiki"])
+
+class ReseedFixturesIn(BaseModel):
+    season_id: str = Field(default=SEASON_ID)
+    start_round_number: int = Field(default=1, ge=1, le=60)
+    rounds: int = Field(ge=1, le=60)
+
+    # optional:
+    replace_rounds: bool = Field(default=False)
+    tol_minutes: int = Field(default=0, ge=0, le=180)
+    include_flagged: bool = Field(default=True)
+
+
+class ReseedFixturesOut(BaseModel):
+    season_id: str
+    rounds_requested: int
+    upsert_created: int
+    upsert_updated: int
+    parsed_total: int
+    flags_updated_rows: int
+    advanced: int
+    postponed: int
+    flagged: list[dict] = []
+
+
+@router.post("/fixtures/reseed_from_acb", response_model=ReseedFixturesOut)
+def reseed_fixtures_from_acb(
+    payload: ReseedFixturesIn,
+    user=Depends(require_wiki),
+    db: Session = Depends(get_db),
+):
+    # 1) scrape + upsert
+    total_created = 0
+    total_updated = 0
+    total_parsed = 0
+
+    # hard replace the rounds we are about to reseed
+    if payload.replace_rounds:
+        for i in range(payload.rounds):
+            rn = payload.start_round_number + i
+            db.query(Fixture).filter(
+                Fixture.season_id == payload.season_id,
+                Fixture.round_number == rn,
+            ).delete(synchronize_session=False)
+        db.commit()
+
+    for i in range(payload.rounds):
+        round_number = payload.start_round_number + i
+        jornada_id = ACB_JORNADA_ID_ROUND1 + (round_number -1)
+
+        parsed = scrape_partidos(
+            season_id=payload.season_id,
+            competicion=ACB_COMPETICION_ID,
+            jornada_id=jornada_id,
+        )
+
+        if not parsed:
+            # Don’t hard-fail: ACB sometimes returns partial/empty.
+            continue
+
+        # map to what upsert expects (your existing pattern)
+        mapped = []
+        for fx in parsed:
+            mapped.append(
+                type("Tmp", (), {
+                    "round_number": round_number,
+                    "home_team_id": fx.home_team_id,
+                    "away_team_id": fx.away_team_id,
+                    "kickoff_at": fx.kickoff_at,
+                    "is_finished": fx.is_finished,
+                    "home_score": fx.home_score,
+                    "away_score": fx.away_score,
+                    "is_postponed": False,  # we recompute later
+                    "is_advanced": False,   # we recompute later
+                })()
+            )
+
+        res = upsert_fixtures(db, season_id=payload.season_id, parsed=mapped)
+        total_created += int(res.get("created", 0))
+        total_updated += int(res.get("updated", 0))
+        total_parsed += int(res.get("total", 0))
+
+    # 2) recompute flags (round-centric)
+    flags_res = recompute_flags_roundcentric(
+        db,
+        season_id=payload.season_id,
+        tol_minutes=payload.tol_minutes,
+    )
+
+    # 3) optionally return flagged list
+    flagged_list = []
+    if payload.include_flagged:
+        flagged_rows = (
+            db.query(Fixture)
+            .filter(
+                Fixture.season_id == payload.season_id,
+                ((Fixture.is_postponed == True) | (Fixture.is_advanced == True)),
+            )
+            .order_by(Fixture.round_number.asc(), Fixture.kickoff_at.asc().nulls_last(), Fixture.id.asc())
+            .all()
+        )
+        for f in flagged_rows:
+            flagged_list.append({
+                "id": f.id,
+                "round_number": f.round_number,
+                "home_team_id": f.home_team_id,
+                "away_team_id": f.away_team_id,
+                "kickoff_at": f.kickoff_at,
+                "is_advanced": f.is_advanced,
+                "is_postponed": f.is_postponed,
+                "is_finished": f.is_finished,
+                "home_score": f.home_score,
+                "away_score": f.away_score,
+            })
+
+    compute_market_status(db)
+
+    return ReseedFixturesOut(
+        season_id=payload.season_id,
+        rounds_requested=payload.rounds,
+        upsert_created=total_created,
+        upsert_updated=total_updated,
+        parsed_total=total_parsed,
+        flags_updated_rows=int(flags_res.get("updated", 0)),
+        advanced=int(flags_res.get("advanced", 0)),
+        postponed=int(flags_res.get("postponed", 0)),
+        flagged=flagged_list,
+    )
 
 def _validate_fixture_state(is_postponed: bool, is_advanced: bool, is_finished: bool,
                            home_score: int | None, away_score: int | None):
@@ -40,10 +173,13 @@ def create_fixture(
     user=Depends(require_wiki),
     db: Session = Depends(get_db),
 ):
+    season_id = payload.season_id  # <-- make sure FixtureCreate includes it
+    # or: season_id = SEASON_ID if you don't want it in payload
+
     # validar equipos
     for tid in (payload.home_team_id, payload.away_team_id):
         team = db.query(Team).filter_by(
-            season_id=SEASON_ID, team_id=tid, is_active=True
+            season_id=season_id, team_id=tid, is_active=True
         ).first()
         if not team:
             raise HTTPException(status_code=400, detail=f"Invalid or inactive team: {tid}")
@@ -60,7 +196,7 @@ def create_fixture(
     )
 
     f = Fixture(
-        season_id=SEASON_ID,
+        season_id=season_id,
         round_number=payload.round_number,
         home_team_id=payload.home_team_id,
         away_team_id=payload.away_team_id,
@@ -93,7 +229,7 @@ def update_fixture(
     user=Depends(require_wiki),
     db: Session = Depends(get_db),
 ):
-    f = db.query(Fixture).filter_by(id=fixture_id, season_id=SEASON_ID).first()
+    f = db.query(Fixture).filter_by(id=fixture_id, season_id=payload.season_id).first()
     if not f:
         raise HTTPException(status_code=404, detail="Fixture not found")
 
@@ -115,3 +251,59 @@ def update_fixture(
     compute_market_status(db)
     return f
 
+class RecomputeFlagsIn(BaseModel):
+    season_id: str = Field(default=SEASON_ID)
+    tol_minutes: int = Field(default=0, ge=0, le=180)
+    include_flagged: bool = True
+
+
+@router.post("/fixtures/recompute_flags", response_model=ReseedFixturesOut)
+def recompute_flags_only(
+    payload: RecomputeFlagsIn,
+    user=Depends(require_wiki),
+    db: Session = Depends(get_db),
+):
+    flags_res = recompute_flags_roundcentric(
+        db,
+        season_id=payload.season_id,
+        tol_minutes=payload.tol_minutes,
+    )
+
+    compute_market_status(db)
+
+    flagged_list = []
+    if payload.include_flagged:
+        flagged_rows = (
+            db.query(Fixture)
+            .filter(
+                Fixture.season_id == payload.season_id,
+                ((Fixture.is_postponed == True) | (Fixture.is_advanced == True)),
+            )
+            .order_by(Fixture.round_number.asc(), Fixture.kickoff_at.asc().nulls_last(), Fixture.id.asc())
+            .all()
+        )
+        flagged_list = [{
+            "id": f.id,
+            "round_number": f.round_number,
+            "home_team_id": f.home_team_id,
+            "away_team_id": f.away_team_id,
+            "kickoff_at": f.kickoff_at,
+            "is_advanced": f.is_advanced,
+            "is_postponed": f.is_postponed,
+            "is_finished": f.is_finished,
+            "home_score": f.home_score,
+            "away_score": f.away_score,
+        } for f in flagged_rows]
+
+    # reuse your output model, filling the parts that don't apply
+    return ReseedFixturesOut(
+        season_id=payload.season_id,
+        rounds_requested=0,
+        upsert_created=0,
+        upsert_updated=0,
+        parsed_total=0,
+        flags_updated_rows=int(flags_res.get("updated", 0)),
+        advanced=int(flags_res.get("advanced", 0)),
+        postponed=int(flags_res.get("postponed", 0)),
+        flagged=flagged_list,
+    )

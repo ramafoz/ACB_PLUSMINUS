@@ -10,6 +10,7 @@ class FixtureCreate(BaseModel):
     kickoff_at: Optional[datetime] = None
     is_postponed: bool = False
     is_advanced: bool = False
+    season_id: str
 
 
 class FixtureUpdate(BaseModel):
@@ -19,6 +20,7 @@ class FixtureUpdate(BaseModel):
     is_finished: Optional[bool] = None
     home_score: Optional[int] = None
     away_score: Optional[int] = None
+    season_id: Optional[str] = None
 
 
 class FixtureOut(BaseModel):

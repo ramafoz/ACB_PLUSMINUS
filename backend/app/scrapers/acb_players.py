@@ -4,11 +4,12 @@ import re
 from html import unescape
 from typing import Dict, Any, List
 
+from app.core.game_config import ACB_TEMPORADA_ID
 from app.scrapers.http import make_client, get_with_retry
 
 
-def fetch_team_roster_html(acb_club_id: str, season_id: str, include_html: bool = False) -> Dict[str, Any]:
-    url = f"https://www.acb.com/club/plantilla-lista/id/{acb_club_id}/temporada_id/{season_id}"
+def fetch_team_roster_html(acb_club_id: str, include_html: bool = False) -> Dict[str, Any]:
+    url = f"https://www.acb.com/club/plantilla-lista/id/{acb_club_id}/temporada_id/{ACB_TEMPORADA_ID}"
     with make_client() as client:
         try:
             resp = get_with_retry(client, url, retries=1, backoff_s=1.0)

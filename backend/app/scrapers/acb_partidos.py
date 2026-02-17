@@ -68,20 +68,19 @@ def _is_matchcard_div(tag) -> bool:
 
 
 def _infer_year_for_ddmm(season_id: str, month: int) -> int:
-    """
-    season_id like "2025-26".
-    If month is Aug-Dec -> start year (2025)
-    If month is Jan-Jul -> end year (2026)
-    """
+    # Accept "2025-26" or "2025"
     try:
-        y0 = int(season_id.split("-")[0])
-        y1 = y0 + 1
+        if "-" in season_id:
+            y0 = int(season_id.split("-")[0])
+            y1 = y0 + 1
+        else:
+            y0 = int(season_id)
+            y1 = y0 + 1
     except Exception:
-        # fallback: current-ish assumption
         y0 = datetime.now().year
         y1 = y0 + 1
-
     return y0 if month >= 8 else y1
+
 
 
 def _parse_kickoff_from_text(season_id: str, text: str) -> Optional[datetime]:
