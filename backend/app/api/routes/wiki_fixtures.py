@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Optional, List
 
@@ -38,7 +39,8 @@ class ReseedFixturesOut(BaseModel):
     advanced: int
     postponed: int
     flagged: list[dict] = []
-
+    warnings: list[str] = []
+    rounds_incomplete: list[dict] = []
 
 @router.post("/fixtures/reseed_from_acb", response_model=ReseedFixturesOut)
 def reseed_fixtures_from_acb(
@@ -60,6 +62,16 @@ def reseed_fixtures_from_acb(
                 Fixture.round_number == rn,
             ).delete(synchronize_session=False)
         db.commit()
+    
+    end_round = payload.start_round_number + payload.rounds - 1
+    if end_round > ROUNDS_REGULAR_SEASON:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid range: start_round_number={payload.start_round_number}, rounds={payload.rounds} exceeds ROUNDS_REGULAR_SEASON={ROUNDS_REGULAR_SEASON}",
+        )
+
+    warnings: list[str] = []
+    rounds_incomplete: list[dict] = []
 
     for i in range(payload.rounds):
         round_number = payload.start_round_number + i
@@ -72,8 +84,13 @@ def reseed_fixtures_from_acb(
         )
 
         if not parsed:
-            # Don’t hard-fail: ACB sometimes returns partial/empty.
+            warnings.append(f"Round {round_number} jornada_id={jornada_id}: parsed=0 (ACB empty/partial)")
+            rounds_incomplete.append({"round_number": round_number, "jornada_id": jornada_id, "parsed": 0})
             continue
+
+        if len(parsed) != 9:
+            warnings.append(f"Round {round_number} jornada_id={jornada_id}: parsed={len(parsed)} (expected 9)")
+            rounds_incomplete.append({"round_number": round_number, "jornada_id": jornada_id, "parsed": len(parsed)})
 
         # map to what upsert expects (your existing pattern)
         mapped = []
@@ -142,6 +159,8 @@ def reseed_fixtures_from_acb(
         advanced=int(flags_res.get("advanced", 0)),
         postponed=int(flags_res.get("postponed", 0)),
         flagged=flagged_list,
+        warnings=warnings,
+        rounds_incomplete=rounds_incomplete,
     )
 
 def _validate_fixture_state(is_postponed: bool, is_advanced: bool, is_finished: bool,
@@ -307,3 +326,36 @@ def recompute_flags_only(
         postponed=int(flags_res.get("postponed", 0)),
         flagged=flagged_list,
     )
+
+
+@router.get("/fixtures/summary")
+def fixtures_summary(
+    season_id: str = SEASON_ID,
+    user=Depends(require_wiki),
+    db: Session = Depends(get_db),
+):
+    total = db.query(func.count(Fixture.id)).filter(Fixture.season_id == season_id).scalar() or 0
+
+    per_round = (
+        db.query(Fixture.round_number, func.count(Fixture.id))
+        .filter(Fixture.season_id == season_id)
+        .group_by(Fixture.round_number)
+        .order_by(Fixture.round_number.asc())
+        .all()
+    )
+
+    advanced = db.query(func.count(Fixture.id)).filter(Fixture.season_id == season_id, Fixture.is_advanced == True).scalar() or 0
+    postponed = db.query(func.count(Fixture.id)).filter(Fixture.season_id == season_id, Fixture.is_postponed == True).scalar() or 0
+    null_kickoff = db.query(func.count(Fixture.id)).filter(Fixture.season_id == season_id, Fixture.kickoff_at == None).scalar() or 0
+
+    bad_rounds = [{"round_number": r, "count": c} for (r, c) in per_round if c != 9]
+
+    return {
+        "season_id": season_id,
+        "total": int(total),
+        "advanced": int(advanced),
+        "postponed": int(postponed),
+        "null_kickoff": int(null_kickoff),
+        "rounds": [{"round_number": int(r), "count": int(c)} for (r, c) in per_round],
+        "rounds_with_count_not_9": bad_rounds,
+    }
