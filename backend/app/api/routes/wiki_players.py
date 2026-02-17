@@ -29,7 +29,7 @@ def scrape_players_stub(
     if not team.acb_club_id:
         return {"ok": False, "detail": f"Team {team_id} has no acb_club_id yet. Fill it first."}
 
-    fetch_info = fetch_team_roster_html(team.acb_club_id)
+    fetch_info = fetch_team_roster_html(team.acb_club_id, payload.season_id)
 
     return {
         "ok": True,
