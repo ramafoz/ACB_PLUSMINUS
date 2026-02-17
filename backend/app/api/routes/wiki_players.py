@@ -9,6 +9,8 @@ from app.schemas.wiki_players import WikiPlayersScrapeRequest
 from app.scrapers.acb_players import fetch_team_roster_html, parse_roster_players, canonicalize_position
 from app.models.teams import Team
 
+from app.services.players_upsert import upsert_roster_players
+
 router = APIRouter(prefix="/wiki/players", tags=["wiki"])
 
 @router.post("/scrape")
@@ -47,6 +49,12 @@ def scrape_players_stub(
             "position": canonicalize_position(p["position_raw"]),
         })
 
+    ins = upd = 0
+    if not payload.dry_run:
+        ins, upd = upsert_roster_players(db, payload.season_id, team.id, preview)
+        db.commit()
+
+
     return {
         "ok": True,
         "step": "parse_players",
@@ -58,4 +66,5 @@ def scrape_players_stub(
             "players_sample": preview[:10],
         },
         "dry_run": payload.dry_run,
+        "db": {"inserted": ins, "updated": upd},
     }
