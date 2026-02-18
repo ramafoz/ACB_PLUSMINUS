@@ -106,6 +106,8 @@ def reseed_fixtures_from_acb(
                     "away_score": fx.away_score,
                     "is_postponed": False,  # we recompute later
                     "is_advanced": False,   # we recompute later
+                    "acb_game_id": getattr(fx, "acb_game_id", None),
+                    "live_url": getattr(fx, "live_url", None),
                 })()
             )
 

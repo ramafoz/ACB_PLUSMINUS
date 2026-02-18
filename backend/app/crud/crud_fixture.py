@@ -45,6 +45,11 @@ def upsert_fixtures(db: Session, season_id: str, parsed: list[ParsedFixture]) ->
         row.away_score = fx.away_score
         row.is_postponed = fx.is_postponed
         row.is_advanced = fx.is_advanced
+        if hasattr(fx, "acb_game_id"):
+            row.acb_game_id = fx.acb_game_id
+
+        if hasattr(fx, "live_url"):
+            row.live_url = fx.live_url
 
     db.commit()
     return {"created": created, "updated": updated, "total": len(parsed)}

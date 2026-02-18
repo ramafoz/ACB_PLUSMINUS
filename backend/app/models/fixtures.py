@@ -30,6 +30,9 @@ class Fixture(Base):
     home_score = Column(Integer, nullable=True)
     away_score = Column(Integer, nullable=True)
 
+    acb_game_id = Column(String(32), nullable=True, index=True)   # "104459"
+    live_url    = Column(String(512), nullable=True)              # optional debugging
+
     __table_args__ = (
         UniqueConstraint(
             "season_id",
