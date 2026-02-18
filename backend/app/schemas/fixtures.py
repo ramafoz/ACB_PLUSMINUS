@@ -11,8 +11,8 @@ class FixtureCreate(BaseModel):
     is_postponed: bool = False
     is_advanced: bool = False
     season_id: str
-    acb_game_id: str | None
-    live_url: str | None
+    acb_game_id: str | None = None
+    live_url: str | None = None
 
 
 class FixtureUpdate(BaseModel):
@@ -23,8 +23,8 @@ class FixtureUpdate(BaseModel):
     home_score: Optional[int] = None
     away_score: Optional[int] = None
     season_id: Optional[str] = None
-    acb_game_id: str | None
-    live_url: str | None
+    acb_game_id: str | None = None
+    live_url: str | None = None
 
 
 class FixtureOut(BaseModel):
