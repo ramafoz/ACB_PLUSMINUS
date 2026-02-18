@@ -17,7 +17,7 @@ def create_team(payload: TeamCreate, user=Depends(require_wiki), db: Session = D
     season_id = (season_id or ACB_TEMPORADA_ID).strip()
     team_id = payload.team_id.strip().upper()
 
-    exists = db.query(Team).filter_by(season_id=ACB_TEMPORADA_ID, team_id=team_id).first()
+    exists = db.query(Team).filter_by(season_id=season_id, team_id=team_id).first()
     if exists:
         raise HTTPException(status_code=400, detail="team_id already exists for this season")
 
@@ -39,7 +39,7 @@ def create_team(payload: TeamCreate, user=Depends(require_wiki), db: Session = D
 def update_team(team_id: str, payload: TeamUpdate, user=Depends(require_wiki), db: Session = Depends(get_db), season_id: str = Query(default=ACB_TEMPORADA_ID),):
     season_id = (season_id or ACB_TEMPORADA_ID).strip()
     tid = team_id.strip().upper()
-    t = db.query(Team).filter_by(season_id=ACB_TEMPORADA_ID, team_id=tid).first()
+    t = db.query(Team).filter_by(season_id=season_id, team_id=tid).first()
     if not t:
         raise HTTPException(status_code=404, detail="Team not found")
 
