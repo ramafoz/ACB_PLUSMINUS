@@ -13,6 +13,7 @@ from app.api.routes.wiki_fixtures import router as wiki_fixtures_router
 from app.api.routes.wiki_players import router as wiki_players_router
 from app.api.routes.public_catalog import router as public_catalog_router
 from app.api.routes.wiki_games import router as wiki_games_router
+from app.api.routes.public_stats import router as public_stats_router
 
 
 app = FastAPI(title="ACB PlusMinus")
@@ -27,6 +28,7 @@ app.include_router(wiki_fixtures_router)
 app.include_router(wiki_players_router)
 app.include_router(wiki_games_router)
 app.include_router(public_catalog_router)
+app.include_router(public_stats_router)
 
 
 @app.on_event("startup")
