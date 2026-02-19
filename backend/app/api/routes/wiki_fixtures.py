@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Optional, List
+import time
 
 from app.core.security import get_db, require_wiki
 from app.core.game_config import SEASON_ID, ACB_COMPETICION_ID, ROUNDS_REGULAR_SEASON, ACB_JORNADA_ID_ROUND1
@@ -73,24 +74,39 @@ def reseed_fixtures_from_acb(
     warnings: list[str] = []
     rounds_incomplete: list[dict] = []
 
+    t0 = time.time()
+    print(
+        f"[reseed] season={payload.season_id} rounds={payload.rounds} "
+        f"range={payload.start_round_number}-{end_round} tol={payload.tol_minutes}min",
+        flush=True,
+    )
+
     for i in range(payload.rounds):
         round_number = payload.start_round_number + i
         jornada_id = ACB_JORNADA_ID_ROUND1 + (round_number -1)
+
+        t_round = time.time()
+        print(f"[reseed] round {round_number:02d}/{end_round:02d} jornada_id={jornada_id} ...", flush=True)
 
         parsed = scrape_partidos(
             season_id=payload.season_id,
             competicion=ACB_COMPETICION_ID,
             jornada_id=jornada_id,
+            round_number=round_number
         )
 
         if not parsed:
-            warnings.append(f"Round {round_number} jornada_id={jornada_id}: parsed=0 (ACB empty/partial)")
+            msg = f"Round {round_number} jornada_id={jornada_id}: parsed=0 (ACB empty/partial)"
+            warnings.append(msg)
             rounds_incomplete.append({"round_number": round_number, "jornada_id": jornada_id, "parsed": 0})
+            print(f"[reseed][WARN] {msg}", flush=True)
             continue
 
         if len(parsed) != 9:
-            warnings.append(f"Round {round_number} jornada_id={jornada_id}: parsed={len(parsed)} (expected 9)")
+            msg = f"Round {round_number} jornada_id={jornada_id}: parsed={len(parsed)} (expected 9)"
+            warnings.append(msg)
             rounds_incomplete.append({"round_number": round_number, "jornada_id": jornada_id, "parsed": len(parsed)})
+            print(f"[reseed][WARN] {msg}", flush=True)
 
         # map to what upsert expects (your existing pattern)
         mapped = []
@@ -104,8 +120,8 @@ def reseed_fixtures_from_acb(
                     "is_finished": fx.is_finished,
                     "home_score": fx.home_score,
                     "away_score": fx.away_score,
-                    "is_postponed": False,  # we recompute later
-                    "is_advanced": False,   # we recompute later
+                    "is_postponed": fx.is_postponed,
+                    "is_advanced": fx.is_advanced,
                     "acb_game_id": getattr(fx, "acb_game_id", None),
                     "live_url": getattr(fx, "live_url", None),
                 })()
@@ -116,11 +132,27 @@ def reseed_fixtures_from_acb(
         total_updated += int(res.get("updated", 0))
         total_parsed += int(res.get("total", 0))
 
+        dt_round = time.time() - t_round
+        print(
+            f"[reseed] round {round_number:02d} done: parsed={len(parsed)} "
+            f"created={res.get('created', 0)} updated={res.get('updated', 0)} "
+            f"elapsed={dt_round:.1f}s",
+            flush=True,
+        )
+
     # 2) recompute flags (round-centric)
+    print("[reseed] recompute flags ...", flush=True)
+    t_flags = time.time()
     flags_res = recompute_flags_roundcentric(
         db,
         season_id=payload.season_id,
         tol_minutes=payload.tol_minutes,
+    )
+    print(
+        f"[reseed] flags done: updated={flags_res.get('updated', 0)} "
+        f"advanced={flags_res.get('advanced', 0)} postponed={flags_res.get('postponed', 0)} "
+        f"elapsed={time.time() - t_flags:.1f}s",
+        flush=True,
     )
 
     # 3) optionally return flagged list
@@ -150,6 +182,12 @@ def reseed_fixtures_from_acb(
             })
 
     compute_market_status(db)
+
+    print(
+        f"[reseed] DONE season={payload.season_id} total_parsed={total_parsed} "
+        f"created={total_created} updated={total_updated} total_elapsed={time.time()-t0:.1f}s",
+        flush=True,
+    )
 
     return ReseedFixturesOut(
         season_id=payload.season_id,

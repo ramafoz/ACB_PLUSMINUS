@@ -11,91 +11,115 @@ def recompute_flags_roundcentric(
     db: Session,
     *,
     season_id: str,
-    tol_minutes: int = 0,  # optional tolerance (set later if you want)
+    tol_minutes: int = 0,
 ) -> dict:
+    """
+    Neighbor-based flagging (your algorithm):
+      a) get all fixtures (with kickoff_at)
+      b) order by kickoff_at
+      c) for fixture n: if n+1 has LOWER round and n+1 is NOT postponed -> flag n as advanced
+      d) for fixture n: if n-1 has HIGHER round and n-1 is NOT advanced  -> flag n as postponed
+      e) never allow flagging to consume an entire round (keep at least 1 unflagged per round)
+      f) optional sanity: teams-per-round check reported as warnings (no DB changes)
+
+    Notes:
+    - Uses a tolerance window: if two games are within tol, we treat them as "same time" and do not infer.
+    - Excludes fixtures with kickoff_at NULL from the ordering/logic.
+    """
     tol = timedelta(minutes=tol_minutes)
 
-    # Only fixtures with kickoff_at can be classified
     rows = (
         db.query(Fixture)
         .filter(Fixture.season_id == season_id)
         .all()
     )
 
-    # Reset flags first (and we'll re-assign)
+    # Reset flags first
     for f in rows:
         f.is_advanced = False
         f.is_postponed = False
 
-    # Group by round (only for those with kickoff)
-    by_round: dict[int, list[Fixture]] = defaultdict(list)
-    for f in rows:
-        if f.kickoff_at is not None:
-            by_round[f.round_number].append(f)
-
-    rounds = sorted(by_round.keys())
-    if not rounds:
+    # Work only with dated fixtures
+    dated = [f for f in rows if f.kickoff_at is not None]
+    if not dated:
         db.commit()
-        return {"updated": 0, "advanced": 0, "postponed": 0, "note": "no kickoff_at rows"}
+        return {"updated": len(rows), "advanced": 0, "postponed": 0, "tol_minutes": tol_minutes, "note": "no kickoff_at rows"}
 
-    # Helper: first kickoff of a round (min)
-    def round_first(r: int):
-        xs = [f.kickoff_at for f in by_round.get(r, []) if f.kickoff_at is not None]
-        return min(xs) if xs else None
+    dated.sort(key=lambda f: (f.kickoff_at, f.round_number, f.id))
 
-    # -------------------------
-    # PASS 1: ADVANCED
-    # Rule c) Round N is advanced if ANY fixture in N starts before FIRST fixture of N-1
-    # -------------------------
+    # PASS 1: ADVANCED (based on next neighbor)
     advanced_ids: set[int] = set()
+    for i, f in enumerate(dated):
+        if i == len(dated) - 1:
+            continue
+        nxt = dated[i + 1]
 
-    first_by_round = {r: round_first(r) for r in rounds}
-
-    for r in rounds:
-        prev = r - 1
-        prev_first = first_by_round.get(prev)
-        if prev_first is None:
+        # If times are essentially the same, don't infer
+        if tol_minutes > 0 and abs(nxt.kickoff_at - f.kickoff_at) <= tol:
             continue
 
-        for f in by_round[r]:
-            if f.kickoff_at is None:
-                continue
-            if f.kickoff_at < (prev_first - tol):
-                advanced_ids.add(f.id)
+        # If next game belongs to an earlier round, current looks "advanced"
+        if nxt.round_number < f.round_number and not nxt.is_postponed:
+            advanced_ids.add(f.id)
 
     for f in rows:
         f.is_advanced = (f.id in advanced_ids)
 
-    # -------------------------
-    # PASS 2: POSTPONED
-    # Rule e) Round N is postponed if ANY fixture in N starts after FIRST NON-ADVANCED fixture of N+1
-    # -------------------------
-    # Compute "first non-advanced kickoff" for each round
-    first_non_advanced_by_round: dict[int, object] = {}
-    for r in rounds:
-        times = [
-            f.kickoff_at
-            for f in by_round[r]
-            if (f.kickoff_at is not None and f.id not in advanced_ids)
-        ]
-        first_non_advanced_by_round[r] = min(times) if times else None
-
+    # PASS 2: POSTPONED (based on previous neighbor)
     postponed_ids: set[int] = set()
+    for i, f in enumerate(dated):
+        if i == 0:
+            continue
+        prv = dated[i - 1]
 
-    for r in rounds:
-        nxt = r + 1
-        nxt_first_non_adv = first_non_advanced_by_round.get(nxt)
-        if nxt_first_non_adv is None:
+        if tol_minutes > 0 and abs(f.kickoff_at - prv.kickoff_at) <= tol:
             continue
 
-        for f in by_round[r]:
-            if f.kickoff_at is None:
-                continue
-            if f.kickoff_at > (nxt_first_non_adv + tol):
-                postponed_ids.add(f.id)
+        # If previous game belongs to a later round, current looks "postponed"
+        if prv.round_number > f.round_number and not prv.is_advanced:
+            postponed_ids.add(f.id)
 
     for f in rows:
         f.is_postponed = (f.id in postponed_ids)
+
+    # GUARDRAIL e): flagged fixtures could never be all fixtures from a round
+    # Keep at least one unflagged game per round (prefer unflagging games closest to the "core" of the round)
+    by_round: dict[int, list[Fixture]] = defaultdict(list)
+    for f in dated:
+        by_round[f.round_number].append(f)
+
+    rounds_fully_flagged = []
+    for r, fx in by_round.items():
+        if not fx:
+            continue
+        flagged = [x for x in fx if x.is_advanced or x.is_postponed]
+        if len(flagged) == len(fx):
+            rounds_fully_flagged.append(r)
+            # unflag one "best candidate" = median kickoff time in that round
+            fx_sorted = sorted(fx, key=lambda x: (x.kickoff_at, x.id))
+            mid = fx_sorted[len(fx_sorted) // 2]
+            mid.is_advanced = False
+            mid.is_postponed = False
+            # also update sets for accurate counts
+            advanced_ids.discard(mid.id)
+            postponed_ids.discard(mid.id)
+
+    # Sanity check: every team should appear exactly once per round (18 teams => 9 games)
+    # We only report; we don't change DB.
+    team_warnings: list[dict] = []
+    for r, fx in sorted(by_round.items()):
+        teams = []
+        for g in fx:
+            teams.append(g.home_team_id)
+            teams.append(g.away_team_id)
+        counts = defaultdict(int)
+        for t in teams:
+            counts[t] += 1
+        missing = []  # can't infer which are missing without the full teams list
+        dup = sorted([t for t, c in counts.items() if c != 1])
+        # If scheduled games count is weird, record it
+        if len(fx) not in (9, 8):  # 8 can happen if a game genuinely missing
+            team_warnings.append({"round": r, "games": len(fx), "teams_with_count_not_1": dup})
 
     db.commit()
     return {
@@ -103,6 +127,8 @@ def recompute_flags_roundcentric(
         "advanced": len(advanced_ids),
         "postponed": len(postponed_ids),
         "tol_minutes": tol_minutes,
+        "rounds_fully_flagged_fixed": rounds_fully_flagged,
+        "team_warnings": team_warnings,
     }
 
 

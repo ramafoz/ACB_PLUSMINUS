@@ -40,10 +40,19 @@ LIVE_DT_RE = re.compile(
 
 LIVE_ACB_RE = re.compile(r"^https?://live\.acb\.com/partidos/.+/(?:previa|resumen)$", re.I)
 
+RX_LIVE_GAME_ID = re.compile(
+    r"^https?://live\.acb\.com/(?:es/|en/)?partidos/[^\"'\s<>]+-(\d{5,})/(?:previa|resumen|estadisticas|preview|summary|stats)\b",
+    re.I,
+)
 
+ACTION_TEXTS = {
+    "previa", "resumen", "estadísticas", "estadisticas",
+    "preview", "summary", "statistics", "stats",
+}
 
 @dataclass(frozen=True)
 class ParsedFixture:
+    round_number: int
     home_team_id: str
     away_team_id: str
     kickoff_at: Optional[datetime]
@@ -53,6 +62,10 @@ class ParsedFixture:
     is_postponed: bool
     is_advanced: bool
     source_url: str
+    
+    # NEW
+    acb_game_id: Optional[str] = None
+    live_url: Optional[str] = None
 
 
 def _extract_team_id_from_href(href: str) -> Optional[str]:
@@ -116,29 +129,33 @@ def _parse_kickoff_from_text(season_id: str, text: str) -> Optional[datetime]:
 
     return None
 
-def _extract_live_match_url(card) -> Optional[str]:
-    hrefs = []
-    for a in card.find_all("a", href=True):
+def _extract_live_action_link_and_game_id(card) -> tuple[Optional[str], Optional[str]]:
+    """
+    Return (live_url, acb_game_id) for THIS matchcard by selecting ONLY the action link:
+    Previa / Resumen / Estadísticas (ignores precedentes).
+    """
+    anchors = card.find_all("a", href=True)
+
+    # 1) Prefer anchors whose visible text is the action label
+    for a in anchors:
+        txt = (a.get_text(" ", strip=True) or "").strip().lower()
+        if txt in ACTION_TEXTS:
+            href = (a.get("href") or "").strip()
+            m = RX_LIVE_GAME_ID.search(href)
+            if m:
+                return href, m.group(1)
+
+    # 2) Fallback: pick first live.acb.com partido link that is *an action URL* (previa/resumen/estadisticas)
+    for a in anchors:
         href = (a.get("href") or "").strip()
-        if href:
-            hrefs.append(href)
+        if "live.acb.com" not in href.lower():
+            continue
+        m = RX_LIVE_GAME_ID.search(href)
+        if m:
+            return href, m.group(1)
 
-    # prefer previa
-    for href in hrefs:
-        if "live.acb.com/partidos/" in href.lower() and href.lower().endswith("/previa"):
-            return href
+    return None, None
 
-    # then resumen
-    for href in hrefs:
-        if "live.acb.com/partidos/" in href.lower() and href.lower().endswith("/resumen"):
-            return href
-
-    # any other live match link
-    for href in hrefs:
-        if LIVE_ACB_RE.match(href):
-            return href
-
-    return None
 
 def _looks_like_skeleton_datetime(card_text: str) -> bool:
     """
@@ -152,6 +169,7 @@ def scrape_partidos(
     season_id: str,
     competicion: int,
     jornada_id: int,
+    round_number: int,
     timeout_s: float = 30.0,
 ) -> List[ParsedFixture]:
     url = PARTIDOS_URL.format(competicion=competicion, jornada_id=jornada_id)
@@ -216,7 +234,7 @@ def scrape_partidos(
 
         kickoff_at = _parse_kickoff_from_text(season_id, card_text)
 
-        live_url = _extract_live_match_url(card)
+        live_url, acb_game_id = _extract_live_action_link_and_game_id(card)
 
         # If ACB card doesn't have a real datetime (skeleton / none), try live.acb.com
         if kickoff_at is None and live_url:
@@ -225,6 +243,7 @@ def scrape_partidos(
 
         fixtures.append(
             ParsedFixture(
+                round_number=round_number,
                 home_team_id=home_id,
                 away_team_id=away_id,
                 kickoff_at=kickoff_at,
@@ -234,6 +253,8 @@ def scrape_partidos(
                 is_postponed=is_postponed,
                 is_advanced=is_advanced,
                 source_url=url,
+                acb_game_id=acb_game_id,
+                live_url=live_url,
             )
         )
 
