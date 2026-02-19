@@ -45,6 +45,15 @@ RX_LIVE_GAME_ID = re.compile(
     re.I,
 )
 
+ACB_STATS_URL = "https://acb.com/partido/estadisticas/id/{game_id}"
+
+# Matches:
+#   19/04/2026 - 18:00
+#   19/04/2026 | 18:00
+ACB_STATS_DT_RE = re.compile(
+    r"\b(\d{1,2}/\d{1,2}/\d{4})\s*(?:-|\|)\s*(\d{1,2}:\d{2})\b"
+)
+
 ACTION_TEXTS = {
     "previa", "resumen", "estadísticas", "estadisticas",
     "preview", "summary", "statistics", "stats",
@@ -157,12 +166,17 @@ def _extract_live_action_link_and_game_id(card) -> tuple[Optional[str], Optional
     return None, None
 
 
+
+
 def _looks_like_skeleton_datetime(card_text: str) -> bool:
     """
     Detect the '--- -- ---' and '--:--' placeholders you pasted.
     """
     return ("---" in card_text) or ("--:--" in card_text)
 
+def _extract_match_datetime_text(card) -> str:
+    dt = card.find("div", class_=re.compile(r"^MatchDateTime_matchDateTime__"))
+    return dt.get_text(" ", strip=True) if dt else ""
 
 def scrape_partidos(
     *,
@@ -232,11 +246,18 @@ def scrape_partidos(
         is_postponed = False
         is_advanced = False
 
-        kickoff_at = _parse_kickoff_from_text(season_id, card_text)
+        dt_text = _extract_match_datetime_text(card)
+        kickoff_at = _parse_kickoff_from_text(season_id, dt_text)
+
+        # If the MatchDateTime block is skeleton, force None (prevents “Precedentes” contamination)
+        if not dt_text or _looks_like_skeleton_datetime(dt_text):
+            kickoff_at = None
 
         live_url, acb_game_id = _extract_live_action_link_and_game_id(card)
 
         # If ACB card doesn't have a real datetime (skeleton / none), try live.acb.com
+        if kickoff_at is None and acb_game_id:
+            kickoff_at = fetch_kickoff_from_acb_stats(acb_game_id)
         if kickoff_at is None and live_url:
             kickoff_at = fetch_kickoff_from_live(live_url)
 
@@ -308,5 +329,54 @@ def fetch_kickoff_from_live(url: str, timeout_s: float = 30.0) -> Optional[datet
     if m2:
         dt = dtparser.parse(m2.group(0), fuzzy=True)
         return dt.astimezone(TZ) if dt.tzinfo else dt.replace(tzinfo=TZ)
+
+    return None
+
+def fetch_kickoff_from_acb_stats(game_id: str, timeout_s: float = 30.0) -> Optional[datetime]:
+    """
+    Fetch kickoff datetime from ACB stats page:
+      https://acb.com/partido/estadisticas/id/<game_id>
+
+    Returns timezone-aware datetime in Europe/Madrid when possible.
+    """
+    url = ACB_STATS_URL.format(game_id=game_id)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Referer": "https://acb.com/",
+        "Connection": "keep-alive",
+    }
+
+    with httpx.Client(headers=headers, timeout=timeout_s, follow_redirects=True) as client:
+        r = client.get(url)
+        r.raise_for_status()
+        html = r.text
+
+    # 1) Fast path: regex directly in HTML (most reliable and cheap)
+    m = ACB_STATS_DT_RE.search(html)
+    if m:
+        # dd/mm/yyyy + hh:mm
+        dt = dtparser.parse(f"{m.group(1)} {m.group(2)}", dayfirst=True)
+        return dt.astimezone(TZ) if (dt.tzinfo and TZ) else dt.replace(tzinfo=TZ)
+
+    soup = BeautifulSoup(html, "lxml")
+
+    # 2) Fallback: search in visible text
+    text = soup.get_text("\n", strip=True)
+    m2 = ACB_STATS_DT_RE.search(text)
+    if m2:
+        dt = dtparser.parse(f"{m2.group(1)} {m2.group(2)}", dayfirst=True)
+        return dt.astimezone(TZ) if (dt.tzinfo and TZ) else dt.replace(tzinfo=TZ)
+
+    # 3) Last resort: try to find any full dd/mm/yyyy then nearest time on same line
+    for line in text.splitlines():
+        if DATE_DDMMYYYY_RE.search(line) and TIME_RE.search(line):
+            # Example line: "19/04/2026 - 18:00 - Palau ..."
+            m3 = ACB_STATS_DT_RE.search(line)
+            if m3:
+                dt = dtparser.parse(f"{m3.group(1)} {m3.group(2)}", dayfirst=True)
+                return dt.astimezone(TZ) if (dt.tzinfo and TZ) else dt.replace(tzinfo=TZ)
 
     return None
