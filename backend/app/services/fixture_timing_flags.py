@@ -2,174 +2,209 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import timedelta
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
 from app.models.fixtures import Fixture
 
-CORE_MIN_COUNT = 5
-MIN_GAP_HOURS = 24.0
-MAX_ITER = 6
+
+# ============================
+# Core concept (your definition)
+# ============================
+# We work on the GLOBAL schedule ordered by kickoff_at.
+#
+# A "core" for a round = the largest contiguous block of that round
+# after removing already-flagged intruders.
+#
+# Outliers (fixtures of that round not in its core) are flagged:
+#   - advanced  if they occur before the core
+#   - postponed if they occur after the core
+#
+# We "peel" intruders iteratively until stable.
+#
+# Extra rules you requested:
+# - If len(core) < 5 => the round is NOT valid for the fantasy game; skip it entirely
+#   (returned in rounds_incomplete; we do NOT try to solve that round further).
+# - Compute the time gap between consecutive cores; warn if < 24h.
 
 
-def _group_by_round(fixtures: list[Fixture]) -> dict[int, list[Fixture]]:
-    by_round: dict[int, list[Fixture]] = defaultdict(list)
-    for g in fixtures:
-        by_round[int(g.round_number)].append(g)
-    return by_round
+MIN_CORE = 5
+MIN_CORE_GAP_HOURS = 24
+MAX_ITERS = 15
 
 
-def _detect_postponed_ids_core(fixtures_sorted: list[Fixture], *, tol: timedelta) -> set[int]:
+def _sorted_rows(rows: List[Fixture]) -> List[Fixture]:
+    # Stable ordering: kickoff_at, then id
+    return sorted(rows, key=lambda f: (f.kickoff_at, f.id))
+
+
+def _compute_runs(schedule: List[Fixture]) -> Dict[int, List[Tuple[int, int]]]:
     """
-    Postponed (robust):
-      A game of round r is postponed only if, by the time it happens,
-      we have already "established" some later round R>r (core >= CORE_MIN_COUNT)
-      earlier in the timeline.
+    Returns runs per round: {round: [(i0,i1), ...]} where i0..i1 are contiguous indices
+    in the provided schedule list.
     """
-    postponed: set[int] = set()
+    runs: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
+    i = 0
+    n = len(schedule)
+    while i < n:
+        r = schedule[i].round_number
+        j = i
+        while j + 1 < n and schedule[j + 1].round_number == r:
+            j += 1
+        runs[r].append((i, j))
+        i = j + 1
+    return runs
 
-    # How many games we've seen per round so far (in time order)
-    seen_count: dict[int, int] = defaultdict(int)
 
-    # Highest round that has reached core count
-    reached_round: Optional[int] = None
-    time_reached_round: Optional[object] = None  # datetime, but keep generic
+def _pick_largest_run(runs_for_round: List[Tuple[int, int]]) -> Tuple[int, int, int]:
+    """
+    Returns (start_idx, end_idx, length) of the largest run.
+    """
+    best = None
+    for a, b in runs_for_round:
+        ln = b - a + 1
+        if best is None or ln > best[2]:
+            best = (a, b, ln)
+    assert best is not None
+    return best
 
-    for g in fixtures_sorted:
-        if g.kickoff_at is None:
+
+def _compute_core_map(schedule: List[Fixture]) -> Tuple[Dict[int, Set[int]], Set[int]]:
+    """
+    For the provided schedule (already filtered for unflagged fixtures),
+    compute:
+      - core_ids_by_round: round -> set(fixture_id) for its core run (if len>=MIN_CORE)
+      - rounds_incomplete: rounds whose largest run is < MIN_CORE
+    """
+    runs = _compute_runs(schedule)
+
+    core_ids_by_round: Dict[int, Set[int]] = {}
+    rounds_incomplete: Set[int] = set()
+
+    for r, rruns in runs.items():
+        a, b, ln = _pick_largest_run(rruns)
+        if ln < MIN_CORE:
+            rounds_incomplete.add(r)
+            continue
+        core_ids_by_round[r] = {schedule[i].id for i in range(a, b + 1)}
+
+    return core_ids_by_round, rounds_incomplete
+
+
+def _classify_outliers(
+    schedule: List[Fixture],
+    core_ids_by_round: Dict[int, Set[int]],
+) -> Tuple[Set[int], Set[int]]:
+    """
+    Given schedule and core map, return (advanced_ids, postponed_ids) to flag.
+    Only rounds that have a valid core (len>=MIN_CORE) participate.
+    """
+    advanced_ids: Set[int] = set()
+    postponed_ids: Set[int] = set()
+
+    # Precompute core time windows for classification
+    core_window: Dict[int, Tuple[datetime, datetime]] = {}
+    for r, core_ids in core_ids_by_round.items():
+        core_rows = [f for f in schedule if f.id in core_ids]
+        if not core_rows:
+            continue
+        core_start = min(f.kickoff_at for f in core_rows)
+        core_end = max(f.kickoff_at for f in core_rows)
+        core_window[r] = (core_start, core_end)
+
+    for f in schedule:
+        r = f.round_number
+        if r not in core_ids_by_round:
+            # incomplete rounds are not processed here
             continue
 
-        r = int(g.round_number)
-        t = g.kickoff_at
+        if f.id in core_ids_by_round[r]:
+            continue  # inside core
 
-        # If we already reached a later round (core-wise), then an earlier round here is postponed
-        if reached_round is not None and r < reached_round:
-            # optional tolerance: require some actual time separation vs the moment we "reached" that later round
-            if time_reached_round is None or (t - time_reached_round) > tol:
-                postponed.add(g.id)
+        # outlier
+        core_start, core_end = core_window[r]
+        if f.kickoff_at < core_start:
+            advanced_ids.add(f.id)
+        elif f.kickoff_at > core_end:
+            postponed_ids.add(f.id)
+        else:
+            # Rare: same datetime window but separated by intruders.
+            # Resolve by position relative to the core run indices.
+            # (If it is not in the core set, it must be outside the core run.)
+            advanced_ids.add(f.id)  # safe fallback; but we can do better:
 
-        # Update seen count AFTER classification (important: don't use the same game to establish its own round first)
-        seen_count[r] += 1
+            # Better fallback: find first/last core index for this round
+            idxs = [i for i, x in enumerate(schedule) if x.id in core_ids_by_round[r]]
+            if idxs:
+                core_i0, core_i1 = min(idxs), max(idxs)
+                my_i = next(i for i, x in enumerate(schedule) if x.id == f.id)
+                if my_i < core_i0:
+                    advanced_ids.add(f.id)
+                    postponed_ids.discard(f.id)
+                elif my_i > core_i1:
+                    postponed_ids.add(f.id)
+                    advanced_ids.discard(f.id)
 
-        # Update reached_round only when core threshold is met
-        if seen_count[r] >= CORE_MIN_COUNT:
-            if reached_round is None or r > reached_round:
-                reached_round = r
-                time_reached_round = t
-
-    return postponed
+    return advanced_ids, postponed_ids
 
 
-def _detect_advanced_ids_core(fixtures_sorted: list[Fixture], *, tol: timedelta) -> set[int]:
+def _compute_core_gaps_hours(
+    schedule: List[Fixture],
+    core_ids_by_round: Dict[int, Set[int]],
+) -> List[dict]:
     """
-    Advanced (robust):
-      A game of round r is advanced only if, looking into the future,
-      we can "establish" some earlier round R<r (core >= CORE_MIN_COUNT)
-      that occurs after this game.
+    Computes the time gap (hours) between consecutive round cores,
+    ordered by round number (not by datetime).
     """
-    advanced: set[int] = set()
-
-    future_seen: dict[int, int] = defaultdict(int)
-
-    # Lowest round in the future that has reached core count
-    future_reached_round: Optional[int] = None
-    time_future_reached: Optional[object] = None
-
-    for g in reversed(fixtures_sorted):
-        if g.kickoff_at is None:
+    # Build core start/end for each round
+    core_bounds: Dict[int, Tuple[datetime, datetime]] = {}
+    for r, ids in core_ids_by_round.items():
+        core_rows = [f for f in schedule if f.id in ids]
+        if not core_rows:
             continue
+        core_bounds[r] = (min(f.kickoff_at for f in core_rows), max(f.kickoff_at for f in core_rows))
 
-        r = int(g.round_number)
-        t = g.kickoff_at
-
-        # If in the future we already reached an earlier round (core-wise), then this higher round is advanced
-        if future_reached_round is not None and r > future_reached_round:
-            if time_future_reached is None or (time_future_reached - t) > tol:
-                advanced.add(g.id)
-
-        # Update future seen count AFTER classification
-        future_seen[r] += 1
-
-        # Update future_reached_round only when core threshold is met
-        if future_seen[r] >= CORE_MIN_COUNT:
-            if future_reached_round is None or r < future_reached_round:
-                future_reached_round = r
-                time_future_reached = t
-
-    return advanced
-
-
-def _compute_core_windows_and_gaps(rows: list[Fixture], *, tol: timedelta):
-    """
-    Core windows computed from UNFLAGGED fixtures only.
-    If core_count < CORE_MIN_COUNT => invalid round (skip entirely).
-    Also compute gaps between consecutive valid core windows; want >= 24h.
-    """
-    dated = [g for g in rows if g.kickoff_at is not None]
-    by_round = _group_by_round(dated)
-
-    core_windows: dict[int, dict] = {}
-    invalid_core_rounds: list[dict] = []
-
-    for r, fx in sorted(by_round.items()):
-        core = [g for g in fx if (not g.is_advanced and not g.is_postponed)]
-        if len(core) < CORE_MIN_COUNT:
-            invalid_core_rounds.append({
-                "round": r,
-                "core_count": len(core),
-                "dated_count": len(fx),
-                "rule": f"core_count < {CORE_MIN_COUNT} => round invalid/skip",
-            })
-            continue
-
-        start = min(g.kickoff_at for g in core)
-        end = max(g.kickoff_at for g in core)
-        core_windows[r] = {"round": r, "start": start, "end": end, "count": len(core)}
-
-    gap_warnings: list[dict] = []
-    valid_rounds = sorted(core_windows.keys())
-
-    tol_hours = tol.total_seconds() / 3600.0
-    min_gap = MIN_GAP_HOURS - tol_hours
-
-    for i in range(len(valid_rounds) - 1):
-        r1 = valid_rounds[i]
-        r2 = valid_rounds[i + 1]
-        end1 = core_windows[r1]["end"]
-        start2 = core_windows[r2]["start"]
-        gap_hours = (start2 - end1).total_seconds() / 3600.0
-
-        if gap_hours < min_gap:
-            gap_warnings.append({
+    out: List[dict] = []
+    rounds = sorted(core_bounds.keys())
+    for i in range(len(rounds) - 1):
+        r1 = rounds[i]
+        r2 = rounds[i + 1]
+        end1 = core_bounds[r1][1]
+        start2 = core_bounds[r2][0]
+        gap_h = (start2 - end1).total_seconds() / 3600.0
+        out.append(
+            {
                 "round_from": r1,
                 "round_to": r2,
-                "gap_hours": round(gap_hours, 2),
-                "min_required_hours": round(min_gap, 2),
+                "gap_hours": gap_h,
+                "ok_ge_24h": gap_h >= float(MIN_CORE_GAP_HOURS),
                 "end_from": end1,
                 "start_to": start2,
-            })
-
-    return core_windows, invalid_core_rounds, gap_warnings
+            }
+        )
+    return out
 
 
 def recompute_flags_roundcentric(
     db: Session,
     *,
     season_id: str,
-    tol_minutes: int = 0,
-    trim_q: float = 0.10,  # kept for signature compatibility (unused)
+    tol_minutes: int = 0,  # kept for API compatibility; not used here
+    trim_q: float = 0.10,  # kept for API compatibility; not used here
 ) -> dict:
-    tol = timedelta(minutes=tol_minutes)
+    """
+    Recompute is_advanced/is_postponed using the "peel intruders until stable" algorithm.
+    """
 
-    rows: list[Fixture] = (
+    rows: List[Fixture] = (
         db.query(Fixture)
         .filter(Fixture.season_id == season_id)
         .all()
     )
 
-    # Reset flags
+    # Reset flags first
     for f in rows:
         f.is_advanced = False
         f.is_postponed = False
@@ -181,86 +216,57 @@ def recompute_flags_roundcentric(
             "updated": len(rows),
             "advanced": 0,
             "postponed": 0,
-            "tol_minutes": tol_minutes,
+            "rounds_incomplete": [],
+            "core_gaps": [],
             "note": "no kickoff_at rows",
-            "core_windows": {},
-            "invalid_core_rounds": [],
-            "gap_warnings": [],
         }
 
-    dated_sorted = sorted(dated, key=lambda g: (g.kickoff_at, int(g.round_number), g.id))
+    base_schedule = _sorted_rows(dated)
 
-    pool_ids = {g.id for g in dated_sorted}
-    postponed_ids: set[int] = set()
-    advanced_ids: set[int] = set()
+    flagged: Set[int] = set()
+    advanced_ids: Set[int] = set()
+    postponed_ids: Set[int] = set()
 
-    # Stabilize (because core definitions depend on which games are excluded)
-    for _ in range(MAX_ITER):
-        pool = [g for g in dated_sorted if g.id in pool_ids]
+    rounds_incomplete_final: Set[int] = set()
+    core_ids_by_round_final: Dict[int, Set[int]] = {}
 
-        # 1) postponed first (safe now because "reached round" requires core>=5)
-        post_new = _detect_postponed_ids_core(pool, tol=tol) - postponed_ids
-        if post_new:
-            postponed_ids |= post_new
-            pool_ids -= post_new
+    for _ in range(MAX_ITERS):
+        # Build schedule excluding currently flagged fixtures
+        schedule = [f for f in base_schedule if f.id not in flagged]
 
-        pool = [g for g in dated_sorted if g.id in pool_ids]
+        core_ids_by_round, rounds_incomplete = _compute_core_map(schedule)
 
-        # 2) advanced second (also uses core>=5, so single postponed games won't poison it)
-        adv_new = _detect_advanced_ids_core(pool, tol=tol) - advanced_ids
-        if adv_new:
-            advanced_ids |= adv_new
-            pool_ids -= adv_new
+        # Keep latest view (the stable one is what we want at the end)
+        rounds_incomplete_final = set(rounds_incomplete)
+        core_ids_by_round_final = {r: set(ids) for r, ids in core_ids_by_round.items()}
 
-        if not post_new and not adv_new:
+        new_adv, new_ppd = _classify_outliers(schedule, core_ids_by_round)
+
+        newly_flagged = (new_adv | new_ppd) - flagged
+        if not newly_flagged:
             break
+
+        flagged |= newly_flagged
+        advanced_ids |= new_adv
+        postponed_ids |= new_ppd
 
     # Write flags
     for f in rows:
-        f.is_postponed = (f.id in postponed_ids)
         f.is_advanced = (f.id in advanced_ids)
-
-    # Guardrail: no round fully flagged (dated fixtures)
-    by_round_dated = _group_by_round(dated)
-    rounds_fully_flagged_fixed: list[int] = []
-    for r, fx in by_round_dated.items():
-        if not fx:
-            continue
-        flagged = [x for x in fx if x.is_advanced or x.is_postponed]
-        if len(flagged) == len(fx):
-            rounds_fully_flagged_fixed.append(r)
-            fx_sorted = sorted(fx, key=lambda x: (x.kickoff_at, x.id))
-            mid = fx_sorted[len(fx_sorted) // 2]
-            mid.is_advanced = False
-            mid.is_postponed = False
-            advanced_ids.discard(mid.id)
-            postponed_ids.discard(mid.id)
-
-    # Team sanity report
-    team_warnings: list[dict] = []
-    for r, fx in sorted(by_round_dated.items()):
-        counts = defaultdict(int)
-        for g in fx:
-            counts[g.home_team_id] += 1
-            counts[g.away_team_id] += 1
-        not_1 = sorted([t for t, c in counts.items() if c != 1])
-        if len(fx) != 9:
-            team_warnings.append({"round": r, "games": len(fx), "teams_with_count_not_1": not_1})
-
-    # Core windows and gaps (and invalid rounds)
-    core_windows, invalid_core_rounds, gap_warnings = _compute_core_windows_and_gaps(rows, tol=tol)
+        f.is_postponed = (f.id in postponed_ids)
 
     db.commit()
+
+    # Compute core gaps on the final "cleaned" schedule
+    final_schedule = [f for f in base_schedule if f.id not in flagged]
+    core_gaps = _compute_core_gaps_hours(final_schedule, core_ids_by_round_final)
 
     return {
         "updated": len(rows),
         "advanced": len(advanced_ids),
         "postponed": len(postponed_ids),
-        "tol_minutes": tol_minutes,
-        "rounds_fully_flagged_fixed": rounds_fully_flagged_fixed,
-        "team_warnings": team_warnings,
-        "core_windows": core_windows,
-        "invalid_core_rounds": invalid_core_rounds,
-        "gap_warnings": gap_warnings,
-        "algo": "core>=5 inversion scan (postponed+advanced stabilized)",
+        "rounds_incomplete": sorted(list(rounds_incomplete_final)),
+        "core_gaps": core_gaps,
+        "min_core": MIN_CORE,
+        "min_core_gap_hours": MIN_CORE_GAP_HOURS,
     }
