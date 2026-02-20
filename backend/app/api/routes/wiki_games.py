@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -24,8 +24,8 @@ class ReseedPlayerStatsOut(BaseModel):
     rows_updated: int
     warnings: list[str] = []
 
-@router.post("/games/reseed_playerstats_from_live", response_model=ReseedPlayerStatsOut)
-def reseed_playerstats_from_live(
+@router.post("/games/reseed_playerstats_from_final", response_model=ReseedPlayerStatsOut)
+def reseed_playerstats_from_final(
     payload: ReseedPlayerStatsIn,
     user=Depends(require_wiki),
     db: Session = Depends(get_db),
@@ -48,7 +48,6 @@ def reseed_playerstats_from_live(
     rows_created = 0
     rows_updated = 0
 
-    # only fixtures with acb_game_id
     with_game = [f for f in fixtures if f.acb_game_id]
     games_found = len(with_game)
 
@@ -64,7 +63,6 @@ def reseed_playerstats_from_live(
             warnings=warnings,
         )
 
-    # optional replace: delete existing stats for those games
     if payload.replace:
         from app.models.game_player_stats import GamePlayerStat
         game_ids = [f.acb_game_id for f in with_game if f.acb_game_id]
@@ -77,7 +75,7 @@ def reseed_playerstats_from_live(
     for f in with_game:
         gid = f.acb_game_id
         try:
-            html = fetch_live_stats_html(gid)
+            html = fetch_live_stats_html(gid)  # now fetches FINAL official stats via acb.com
             rows = parse_minutes_plusminus(html)
             res = upsert_game_player_stats(db, payload.season_id, gid, rows)
             rows_created += int(res.get("created", 0))

@@ -18,9 +18,20 @@ def _attach_player_team(db: Session, season_id: str, acb_player_id: str | None):
     if not acb_player_id:
         return None, None, None
 
+    season_id = (season_id or "").strip()
+    candidates = [season_id]
+
+    # If stats use "2025-26" but players use "2025"
+    if "-" in season_id:
+        candidates.append(season_id.split("-")[0])
+
+    # Also try the reverse (just in case later you standardize players to "2025-26")
+    if len(season_id) == 4 and season_id.isdigit():
+        candidates.append(f"{season_id}-{str(int(season_id)+1)[-2:]}")  # "2025" -> "2025-26"
+
     p = (
         db.query(Player)
-        .filter(Player.season_id == season_id, Player.acb_player_id == acb_player_id)
+        .filter(Player.acb_player_id == acb_player_id, Player.season_id.in_(candidates))
         .first()
     )
     if not p:
